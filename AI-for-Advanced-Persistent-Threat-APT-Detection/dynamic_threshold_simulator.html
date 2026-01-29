@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>APT Live Defense Dashboard</title>
+    <style>
+        :root { --bg: #0f172a; --panel: #1e293b; --text: #e2e8f0; --accent: #38bdf8; --danger: #ef4444; --safe: #22c55e; }
+        body { margin: 0; padding: 20px; font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); }
+        .dashboard { max-width: 1200px; margin: 0 auto; display: grid; grid-template-columns: 3fr 1fr; gap: 20px; }
+        .header { grid-column: 1 / -1; margin-bottom: 20px; border-bottom: 1px solid #334155; padding-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+        .monitor { background: var(--panel); border-radius: 12px; padding: 20px; height: 500px; position: relative; overflow: hidden; border: 1px solid #334155; }
+        .controls { background: var(--panel); border-radius: 12px; padding: 20px; border: 1px solid #334155; height: fit-content; }
+        
+        /* The Moving Graph */
+        .chart-container { width: 100%; height: 100%; position: relative; border-left: 2px solid #475569; border-bottom: 2px solid #475569; }
+        .dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; transition: left 0.1s linear, background 0.2s; }
+        .threshold-line { position: absolute; width: 100%; height: 2px; background: var(--accent); z-index: 10; transition: bottom 0.3s ease-out; box-shadow: 0 0 10px var(--accent); }
+        .static-line { position: absolute; width: 100%; height: 1px; background: #64748b; bottom: 50%; border-bottom: 1px dashed white; opacity: 0.5; z-index: 5; }
+        .label-t { position: absolute; right: 5px; color: var(--accent); font-size: 12px; font-weight: bold; background: var(--panel); padding: 2px 5px; border-radius: 4px; }
+        
+        /* Upload Button */
+        .file-upload { display: inline-block; padding: 8px 15px; background: #475569; color: white; border-radius: 5px; cursor: pointer; font-size: 14px; }
+        .file-upload:hover { background: #64748b; }
+        
+        /* Stats */
+        .stat-box { margin-bottom: 20px; padding: 15px; background: rgba(0,0,0,0.2); border-radius: 8px; }
+        .stat-val { font-size: 24px; font-weight: bold; margin-top: 5px; }
+        .stat-label { font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 1px; }
+        
+        input[type=range] { width: 100%; margin: 10px 0; accent-color: var(--accent); }
+        button { background: var(--accent); color: var(--bg); border: none; padding: 12px 20px; border-radius: 6px; cursor: pointer; width: 100%; font-weight: bold; margin-top: 10px; font-size: 14px; }
+        button:hover { opacity: 0.9; }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <div>
+        <h1>🛡️ APT Live Defense System</h1>
+        <p style="color: #94a3b8">Dynamic Thresholding Visualization</p>
+    </div>
+    <div>
+        <label class="file-upload">
+            📂 Load 'CIC_IDS2017_Synthetic.csv'
+            <input type="file" id="csvInput" accept=".csv" style="display: none;">
+        </label>
+    </div>
+</div>
+
+<div class="dashboard">
+    <div class="monitor">
+        <div class="chart-container" id="chart">
+            <div class="static-line"></div>
+            <div class="threshold-line" id="dynamicLine" style="bottom: 50%"></div>
+            <div class="label-t" id="threshLabel" style="bottom: 52%">Threshold: 0.50</div>
+            <p id="loadingText" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #64748b;">Waiting for Data... (Upload CSV or Start Simulation)</p>
+        </div>
+    </div>
+
+    <div class="controls">
+        <div class="stat-box">
+            <div class="stat-label">Network Volatility</div>
+            <div class="stat-val" id="noiseDisplay" style="color: var(--safe)">Stable</div>
+            <input type="range" id="entropySlider" min="0" max="100" value="20">
+        </div>
+        
+        <div class="stat-box">
+            <div class="stat-label">Attacks Detected</div>
+            <div class="stat-val" id="blockedCount" style="color: var(--safe)">0</div>
+        </div>
+
+        <div class="stat-box">
+            <div class="stat-label">Attacks Missed</div>
+            <div class="stat-val" id="missedCount" style="color: var(--danger)">0</div>
+        </div>
+
+        <button onclick="toggleSim()" id="simBtn">▶ Start Simulation (Random Data)</button>
+        <div style="margin-top: 15px; font-size: 12px; color: #64748b;">
+            <strong>Legend:</strong><br>
+            <span style="color: #ef4444">●</span> Red Dot = APT Attack<br>
+            <span style="color: #38bdf8">●</span> Blue Dot = Benign Traffic<br>
+            <span style="color: #64748b">---</span> Static Threshold (50%)
+        </div>
+    </div>
+</div>
+
+<script>
+    const chart = document.getElementById('chart');
+    const dynamicLine = document.getElementById('dynamicLine');
+    const threshLabel = document.getElementById('threshLabel');
+    const noiseDisplay = document.getElementById('noiseDisplay');
+    const loadingText = document.getElementById('loadingText');
+    
+    let dots = [];
+    let noiseLevel = 20;
+    let blocked = 0;
+    let missed = 0;
+    let isRunning = false;
+    let useCsvData = false;
+    let csvDataQueue = [];
+
+    // --- CSV Handling ---
+    document.getElementById('csvInput').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            const text = e.target.result;
+            parseCSV(text);
+        };
+        reader.readAsText(file);
+    });
+
+    function parseCSV(text) {
+        const lines = text.split('\n');
+        csvDataQueue = [];
+        // Skip header, parse lines
+        for(let i=1; i<lines.length; i++) {
+            if(!lines[i].trim()) continue;
+            const cols = lines[i].split(',');
+            // We use 'Packet_Len_Var' (Feat_1) as Y-axis proxy and Label as Color
+            const yVal = parseFloat(cols[1]); // Normalized somewhat
+            const label = parseInt(cols[25]); // Label is last column
+            
+            // Normalize yVal for visualization (assuming synthetic data range)
+            let visualY = Math.abs(yVal) * 10; 
+            if(visualY > 90) visualY = 90;
+            
+            csvDataQueue.push({ y: visualY, isAttack: label === 1 });
+        }
+        loadingText.innerText = `Loaded ${csvDataQueue.length} packets from CSV!`;
+        useCsvData = true;
+        document.getElementById('simBtn').innerText = "▶ Play CSV Data";
+    }
+
+    // --- Simulation Logic ---
+    document.getElementById('entropySlider').oninput = function() {
+        noiseLevel = parseInt(this.value);
+        if(noiseLevel < 30) { noiseDisplay.innerText = "Stable (Low)"; noiseDisplay.style.color = "#22c55e"; }
+        else if(noiseLevel < 70) { noiseDisplay.innerText = "Active (Med)"; noiseDisplay.style.color = "#facc15"; }
+        else { noiseDisplay.innerText = "Volatile (High)"; noiseDisplay.style.color = "#ef4444"; }
+    };
+
+    function toggleSim() {
+        isRunning = !isRunning;
+        document.getElementById('simBtn').innerText = isRunning ? "⏸ Pause" : "▶ Resume";
+        loadingText.style.display = 'none';
+        if(isRunning) loop();
+    }
+
+    function spawnDot() {
+        let yPos, isAttack;
+
+        if(useCsvData && csvDataQueue.length > 0) {
+            // Use Real CSV Data
+            const packet = csvDataQueue.shift(); // Get next packet
+            // If CSV runs out, loop simulated
+            if(!packet) { useCsvData = false; return; }
+            
+            // Map CSV features to visual Y position
+            // Attacks in CSV usually have weird values, we map them visually
+            yPos = packet.y;
+            isAttack = packet.isAttack;
+            
+            // Visual tweak: Ensure attacks are visually distinct for demo
+            if(isAttack) yPos = 40 + Math.random() * 20; 
+            else yPos = Math.random() * 30;
+
+        } else {
+            // Simulate Data
+            isAttack = Math.random() > 0.90;
+            if (isAttack) yPos = 35 + Math.random() * 20; // Attacks hover near threshold
+            else yPos = Math.random() * 30; // Benign is low
+        }
+
+        const dot = document.createElement('div');
+        dot.className = 'dot';
+        dot.style.left = '100%';
+        dot.style.bottom = yPos + '%';
+        dot.style.backgroundColor = isAttack ? '#ef4444' : '#38bdf8';
+        
+        chart.appendChild(dot);
+        dots.push({ el: dot, pos: 100, y: yPos, isAttack: isAttack });
+    }
+
+    function loop() {
+        if(!isRunning) return;
+
+        // Dynamic Threshold Logic
+        let threshold = 50 + ((noiseLevel - 20) * 0.4); 
+        threshold = Math.max(30, Math.min(80, threshold));
+        
+        dynamicLine.style.bottom = threshold + '%';
+        threshLabel.style.bottom = (threshold + 2) + '%';
+        threshLabel.innerText = `Threshold: ${(threshold/100).toFixed(2)}`;
+
+        // Spawn items
+        if (Math.random() > 0.85) spawnDot();
+
+        // Move items
+        for (let i = dots.length - 1; i >= 0; i--) {
+            let d = dots[i];
+            d.pos -= 0.5;
+            d.el.style.left = d.pos + '%';
+
+            // Check Detection when passing middle
+            if (!d.checked && d.pos < 50) {
+                if (d.isAttack) {
+                    if (d.y > threshold) {
+                        d.el.style.boxShadow = "0 0 10px #ef4444, 0 0 20px #ef4444";
+                        d.el.style.transform = "scale(1.5)";
+                        blocked++;
+                    } else {
+                        d.el.style.opacity = 0.2;
+                        missed++;
+                    }
+                    document.getElementById('blockedCount').innerText = blocked;
+                    document.getElementById('missedCount').innerText = missed;
+                }
+                d.checked = true;
+            }
+
+            if (d.pos < -5) {
+                d.el.remove();
+                dots.splice(i, 1);
+            }
+        }
+        requestAnimationFrame(loop);
+    }
+</script>
+</body>
+</html>
